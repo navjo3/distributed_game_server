@@ -1,2 +1,4 @@
-websockets
 aioconsole
+flask
+websockets
+aiohttp
