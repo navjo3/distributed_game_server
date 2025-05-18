@@ -1,0 +1,4 @@
+aioconsole
+flask
+websockets
+aiohttp

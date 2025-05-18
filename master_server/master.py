@@ -5,11 +5,22 @@ import threading
 import uuid
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import os
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
-MATCHMAKING_PORT = 8765
+# Configuration
+HOST = "0.0.0.0"  # Allow external connections
+HTTP_PORT = int(os.environ.get("PORT", 5000))  # For cloud platforms that set their own port
+MATCHMAKING_PORT = int(os.environ.get("WS_PORT", 8765))
+GAME_SERVER_PORT = int(os.environ.get("GAME_PORT", 9001))
+
+# Get the public IP or domain name from environment variable
+PUBLIC_HOST = os.environ.get("PUBLIC_HOST", HOST)
+MATCHMAKING_WS_URL = f"ws://{PUBLIC_HOST}:{MATCHMAKING_PORT}"
+GAME_SERVER_WS_URL = f"ws://{PUBLIC_HOST}:{GAME_SERVER_PORT}/game/"
+
 MATCHMAKING_WS_URL = f"ws://localhost:{MATCHMAKING_PORT}"
 GAME_SERVER_WS_URL = "ws://localhost:9001/game/"
 MAX_PLAYERS_PER_MATCH = 4
@@ -344,7 +355,7 @@ def start_websocket_server():
     asyncio.set_event_loop(loop)
     
     async def start_server():
-        async with websockets.serve(matchmaking_handler, "localhost", MATCHMAKING_PORT) as server:
+        async with websockets.serve(matchmaking_handler, "0.0.0.0", MATCHMAKING_PORT) as server:
             print(f"Matchmaking WebSocket running on {MATCHMAKING_WS_URL}")
             await asyncio.Future()  # run forever
     
@@ -354,9 +365,16 @@ def start_websocket_server():
         loop.close()
 
 def start_flask_server():
-    print("Flask REST API running on http://localhost:5000")
-    app.run(port=5000)
+    print(f"Flask REST API running on http://{HOST}:{HTTP_PORT}")
+    app.run(host="0.0.0.0", port=5000)
+
 
 if __name__ == "__main__":
+    # Print server information
+    print(f"Starting master server...")
+    print(f"HTTP API will be available at: http://{PUBLIC_HOST}:{HTTP_PORT}")
+    print(f"WebSocket server will be available at: {MATCHMAKING_WS_URL}")
+    print(f"Game server will be available at: {GAME_SERVER_WS_URL}")
+    
     threading.Thread(target=start_websocket_server, daemon=True).start()
     start_flask_server()

@@ -8,9 +8,16 @@ import websockets
 import traceback
 import uuid
 import sys
+import os
 
-MASTER_API = "http://localhost:5000"
-MATCHMAKING_WS = "ws://localhost:8765"
+# Server configuration - can be set via environment variables
+SERVER_HOST = os.environ.get("SERVER_HOST", "localhost")  # Change this to your cloud server's IP/domain
+SERVER_HTTP_PORT = os.environ.get("SERVER_HTTP_PORT", "5000")
+SERVER_WS_PORT = os.environ.get("SERVER_WS_PORT", "8765")
+
+# API endpoints
+MASTER_API = f"http://192.168.213.236:5000"
+MATCHMAKING_WS = f"ws://192.168.213.236:8765"
 
 def debug_print(*args, **kwargs):
     print("[DEBUG]", *args, **kwargs)
@@ -20,6 +27,11 @@ class GameClientApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Distributed Game Client")
+        
+        # Add server connection info
+        debug_print(f"Connecting to server at {MASTER_API}")
+        debug_print(f"WebSocket endpoint at {MATCHMAKING_WS}")
+        
         self.username = None
         self.match_info = None
         self.room_code = None
@@ -56,18 +68,52 @@ class GameClientApp:
     def show_connection_error(self):
         self.clear_screen()
         tk.Label(self.root, text="⚠️ Server Connection Error", font=('Arial', 14, 'bold')).pack(pady=20)
-        tk.Label(self.root, text="Could not connect to the game server.").pack()
-        tk.Label(self.root, text="Please ensure the server is running at:").pack(pady=10)
-        tk.Label(self.root, text=f"{MASTER_API}", font=('Arial', 10, 'italic')).pack()
+        tk.Label(self.root, text="Could not connect to the game server at:").pack()
+        tk.Label(self.root, text=f"{MASTER_API}", font=('Arial', 10, 'italic')).pack(pady=5)
         
-        tk.Button(self.root, text="Retry Connection", command=self.retry_connection).pack(pady=20)
-        tk.Button(self.root, text="Exit", command=self.root.quit).pack()
+        # Add server configuration frame
+        config_frame = tk.Frame(self.root)
+        config_frame.pack(pady=20, padx=20)
+        
+        tk.Label(config_frame, text="Server Host:").grid(row=0, column=0, sticky="e", padx=5)
+        self.host_entry = tk.Entry(config_frame)
+        self.host_entry.insert(0, SERVER_HOST)
+        self.host_entry.grid(row=0, column=1, sticky="w")
+        
+        tk.Label(config_frame, text="HTTP Port:").grid(row=1, column=0, sticky="e", padx=5)
+        self.http_port_entry = tk.Entry(config_frame)
+        self.http_port_entry.insert(0, SERVER_HTTP_PORT)
+        self.http_port_entry.grid(row=1, column=1, sticky="w")
+        
+        tk.Label(config_frame, text="WebSocket Port:").grid(row=2, column=0, sticky="e", padx=5)
+        self.ws_port_entry = tk.Entry(config_frame)
+        self.ws_port_entry.insert(0, SERVER_WS_PORT)
+        self.ws_port_entry.grid(row=2, column=1, sticky="w")
+        
+        button_frame = tk.Frame(self.root)
+        button_frame.pack(pady=10)
+        
+        tk.Button(button_frame, text="Update & Retry", command=self.update_server_config).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="Exit", command=self.root.quit).pack(side=tk.LEFT, padx=5)
 
-    def retry_connection(self):
+    def update_server_config(self):
+        global MASTER_API, MATCHMAKING_WS, SERVER_HOST, SERVER_HTTP_PORT, SERVER_WS_PORT
+        
+        SERVER_HOST = self.host_entry.get().strip()
+        SERVER_HTTP_PORT = self.http_port_entry.get().strip()
+        SERVER_WS_PORT = self.ws_port_entry.get().strip()
+        
+        MASTER_API = f"http://{SERVER_HOST}:{SERVER_HTTP_PORT}"
+        MATCHMAKING_WS = f"ws://{SERVER_HOST}:{SERVER_WS_PORT}"
+        
+        debug_print(f"Updated server configuration:")
+        debug_print(f"MASTER_API: {MASTER_API}")
+        debug_print(f"MATCHMAKING_WS: {MATCHMAKING_WS}")
+        
         if self.check_server():
             self.init_main_screen()
         else:
-            messagebox.showerror("Connection Error", "Could not connect to the server. Please ensure it is running.")
+            messagebox.showerror("Connection Error", "Could not connect to the server with the new configuration.")
 
     def clear_screen(self):
         for widget in self.root.winfo_children():
