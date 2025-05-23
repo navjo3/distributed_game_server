@@ -6,6 +6,10 @@ import uuid
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
+<<<<<<< HEAD
+=======
+from websockets.asyncio.server import serve  # Add this import
+>>>>>>> 1c9a33f (reverting changes)
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -355,7 +359,12 @@ def start_websocket_server():
     asyncio.set_event_loop(loop)
     
     async def start_server():
+<<<<<<< HEAD
         async with websockets.serve(matchmaking_handler, "0.0.0.0", MATCHMAKING_PORT) as server:
+=======
+        # Use the imported serve function
+        async with serve(matchmaking_handler, "0.0.0.0", MATCHMAKING_PORT) as server:
+>>>>>>> 1c9a33f (reverting changes)
             print(f"Matchmaking WebSocket running on {MATCHMAKING_WS_URL}")
             await asyncio.Future()  # run forever
     

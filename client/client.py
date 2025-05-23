@@ -11,6 +11,7 @@ import sys
 import os
 
 # Server configuration - can be set via environment variables
+<<<<<<< HEAD
 SERVER_HOST = os.environ.get("SERVER_HOST", "localhost")  # Change this to your cloud server's IP/domain
 SERVER_HTTP_PORT = os.environ.get("SERVER_HTTP_PORT", "5000")
 SERVER_WS_PORT = os.environ.get("SERVER_WS_PORT", "8765")
@@ -18,6 +19,17 @@ SERVER_WS_PORT = os.environ.get("SERVER_WS_PORT", "8765")
 # API endpoints
 MASTER_API = f"http://192.168.213.236:5000"
 MATCHMAKING_WS = f"ws://192.168.213.236:8765"
+=======
+SERVER_HOST = os.environ.get("SERVER_HOST", "localhost")
+SERVER_HTTP_PORT = os.environ.get("SERVER_HTTP_PORT", "5000")
+SERVER_WS_PORT = os.environ.get("SERVER_WS_PORT", "8765")
+GAME_SERVER_PORT = os.environ.get("GAME_SERVER_PORT", "9001")
+
+# API endpoints
+MASTER_API = f"http://{SERVER_HOST}:{SERVER_HTTP_PORT}"
+MATCHMAKING_WS = f"ws://{SERVER_HOST}:{SERVER_WS_PORT}"
+GAME_SERVER_WS = f"ws://{SERVER_HOST}:{GAME_SERVER_PORT}"
+>>>>>>> 1c9a33f (reverting changes)
 
 def debug_print(*args, **kwargs):
     print("[DEBUG]", *args, **kwargs)
@@ -26,18 +38,26 @@ def debug_print(*args, **kwargs):
 class GameClientApp:
     def __init__(self, root):
         self.root = root
+<<<<<<< HEAD
         self.root.title("Distributed Game Client")
         
         # Add server connection info
         debug_print(f"Connecting to server at {MASTER_API}")
         debug_print(f"WebSocket endpoint at {MATCHMAKING_WS}")
         
+=======
+        self.root.title("Gem Hunt")
+        
+        # Game state
+>>>>>>> 1c9a33f (reverting changes)
         self.username = None
         self.match_info = None
         self.room_code = None
         self.is_host = False
         self.matchmaking_active = False
         self.websocket = None
+        self.game_state = None
+        self.running = False
         
         # Verify server connection before starting
         if self.check_server():
@@ -450,38 +470,205 @@ class GameClientApp:
 
     def show_game_screen(self):
         self.clear_screen()
+        self.running = True
 
-        tk.Label(self.root, text="🎮 Match Started!", font=("Helvetica", 16, "bold")).pack(pady=10)
+        # Game info frame
+        info_frame = ttk.Frame(self.root)
+        info_frame.pack(pady=5, padx=10, fill=tk.X)
         
-        # Match info
-        info_frame = tk.Frame(self.root)
-        info_frame.pack(pady=10, padx=20, fill=tk.X)
+        self.time_label = ttk.Label(info_frame, text="Time: 60")
+        self.time_label.pack(side=tk.LEFT, padx=5)
         
-        tk.Label(info_frame, text=f"Match ID: {self.match_info['match_id']}", anchor="w").pack(fill=tk.X)
-        tk.Label(info_frame, text=f"Game Server: {self.match_info['game_server']}", anchor="w").pack(fill=tk.X)
-        
-        # Host info
-        host_name = self.match_info['host']
-        host_status = " (You)" if host_name == self.username else ""
-        tk.Label(info_frame, text=f"Host: {host_name}{host_status}", anchor="w").pack(fill=tk.X)
-        
-        # Players list
-        tk.Label(self.root, text="Players:", font=("Helvetica", 10, "bold")).pack(anchor="w", padx=20)
-        
-        players_frame = tk.Frame(self.root)
-        players_frame.pack(pady=5, padx=20, fill=tk.X)
-        
-        for player in self.match_info['players']:
-            you_tag = " (You)" if player == self.username else ""
-            host_tag = " (Host)" if player == self.match_info['host'] else ""
-            tag = you_tag or host_tag
-            tk.Label(players_frame, text=f"• {player}{tag}", anchor="w").pack(fill=tk.X)
+        self.score_label = ttk.Label(info_frame, text="Score: 0")
+        self.score_label.pack(side=tk.LEFT, padx=5)
 
-        # Exit button
-        tk.Button(self.root, text="Exit", command=self.root.quit).pack(pady=20)
+        # Game grid frame
+        self.grid_frame = ttk.Frame(self.root)
+        self.grid_frame.pack(pady=10, padx=10)
+        
+        # Controls info
+        controls_frame = ttk.Frame(self.root)
+        controls_frame.pack(pady=5)
+        ttk.Label(controls_frame, text="Controls: W (Up) | A (Left) | S (Down) | D (Right)").pack()
+
+        # Bind keyboard controls
+        self.root.bind('w', lambda e: self.send_move("up"))
+        self.root.bind('a', lambda e: self.send_move("left"))
+        self.root.bind('s', lambda e: self.send_move("down"))
+        self.root.bind('d', lambda e: self.send_move("right"))
+        
+        # Also bind arrow keys for convenience
+        self.root.bind('<Up>', lambda e: self.send_move("up"))
+        self.root.bind('<Left>', lambda e: self.send_move("left"))
+        self.root.bind('<Down>', lambda e: self.send_move("down"))
+        self.root.bind('<Right>', lambda e: self.send_move("right"))
+
+        # Start game connection
+        threading.Thread(target=self.connect_to_game, daemon=True).start()
+
+    def connect_to_game(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._connect_to_game())
+        finally:
+            loop.close()
+
+    async def _connect_to_game(self):
+        try:
+            # Fix the URL format - remove the extra /game/ part as it's already in the path
+            game_server_url = f"{GAME_SERVER_WS}/game/{self.match_info['match_id']}"
+            print(f"Connecting to game server at: {game_server_url}")
+            self.websocket = await websockets.connect(game_server_url)
+            await self.websocket.send(json.dumps({
+                "type": "join",
+                "username": self.username
+            }))
+
+            while self.running:
+                message = await self.websocket.recv()
+                data = json.loads(message)
+                
+                if data["type"] == "game_state":
+                    self.root.after(0, lambda: self.update_game_state(data["state"]))
+                elif data["type"] == "error":
+                    self.root.after(0, lambda: messagebox.showerror("Error", data["message"]))
+                    self.running = False
+                    break
+
+        except Exception as e:
+            error_msg = str(e)
+            print(f"Game connection error: {error_msg}")
+            print(traceback.format_exc())
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Game connection error: {error_msg}"))
+            self.running = False
+
+    def send_move(self, direction: str):
+        if self.websocket:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self._send_move(direction))
+            finally:
+                loop.close()
+
+    async def _send_move(self, direction: str):
+        try:
+            await self.websocket.send(json.dumps({
+                "type": "move",
+                "direction": direction
+            }))
+        except Exception as e:
+            print(f"Error sending move: {str(e)}")
+            print(traceback.format_exc())
+
+    def update_game_state(self, state):
+        # Update time
+        self.time_label.config(text=f"Time: {int(state['time_remaining'])}")
+        
+        # Update scores
+        scores = [f"{player}: {data['score']}" for player, data in state["players"].items()]
+        self.score_label.config(text=" | ".join(scores))
+        
+        # Update grid
+        for widget in self.grid_frame.winfo_children():
+            widget.destroy()
+            
+        grid = state["grid"]
+        players = state["players"]
+        
+        for y in range(len(grid)):
+            for x in range(len(grid[0])):
+                cell = ttk.Frame(self.grid_frame, width=30, height=30, relief="solid", borderwidth=1)
+                cell.grid(row=y, column=x)
+                
+                if grid[y][x] == 1:
+                    ttk.Label(cell, text="💎").place(relx=0.5, rely=0.5, anchor="center")
+                
+                for player, data in players.items():
+                    if data["position"] == (x, y):
+                        ttk.Label(cell, text=player[0].upper()).place(relx=0.5, rely=0.5, anchor="center")
+        
+        if state.get("game_over"):
+            messagebox.showinfo("Game Over", f"Winner: {state.get('winner')}")
+            self.running = False
+            self.root.quit()
+
+    def _update_game_state(self, state):
+        """Update the game state display"""
+        print(f"Updating game state: {state}")
+        self.game_state = state
+        
+        # Update score labels
+        for player, score in state["scores"].items():
+            if player in self.score_labels:
+                self.score_labels[player].config(text=f"{player}: {score}")
+        
+        # Update time remaining
+        time_left = max(0, int(state["time_remaining"]))
+        self.time_label.config(text=f"Time: {time_left}s")
+        
+        # Update grid
+        for i in range(10):
+            for j in range(10):
+                cell = self.grid_cells[i][j]
+                cell.config(text="")
+                cell.config(bg="white")
+        
+        # Draw gems
+        for gem in state["gems"]:
+            x, y = gem
+            self.grid_cells[y][x].config(text="💎")
+        
+        # Draw players
+        for player, pos in state["positions"].items():
+            x, y = pos
+            cell = self.grid_cells[y][x]
+            cell.config(text="👤")
+            cell.config(bg="lightblue")
+        
+        # Check for game over
+        if state.get("game_over"):
+            winner = state.get("winner")
+            if winner:
+                messagebox.showinfo("Game Over", f"Game Over! {winner} wins!")
+            else:
+                messagebox.showinfo("Game Over", "Game Over! It's a tie!")
+            self._show_matchmaking()
+
+    async def _receive_messages(self):
+        """Receive and handle messages from the server"""
+        try:
+            async for message in self.ws:
+                data = json.loads(message)
+                print(f"Received message: {data}")
+                
+                if data["type"] == "game_state":
+                    # Update game state in the main thread
+                    self.root.after(0, lambda s=data["state"]: self._update_game_state(s))
+                elif data["type"] == "error":
+                    messagebox.showerror("Error", data["message"])
+                    self._show_matchmaking()
+        except Exception as e:
+            print(f"Error receiving messages: {e}")
+            print(traceback.format_exc())
+            error_msg = str(e)
+            self.root.after(0, lambda: messagebox.showerror("Connection Error", f"Lost connection to game server: {error_msg}"))
+            self._show_matchmaking()
+
+    def run(self):
+        self.root.mainloop()
+        self.running = False
+        if self.websocket:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.websocket.close())
+            finally:
+                loop.close()
 
 if __name__ == "__main__":
     root = tk.Tk()
-    root.geometry("350x400")
+    root.geometry("400x500")
     app = GameClientApp(root)
-    root.mainloop()
+    app.run()
