@@ -1,324 +1,259 @@
 import asyncio
-import websockets
 import json
-import random
-import time
-from typing import Dict, List, Tuple, Set
-import uuid
-import traceback
+from websockets.server import WebSocketServerProtocol, serve  # Updated import path
+from datetime import datetime, UTC
+import os
+# import weakref # REMOVE THIS
 
-# Game constants
-GRID_SIZE = 10
-GEM_SPAWN_INTERVAL = 5  # seconds
-GAME_DURATION = 60  # seconds
-MAX_PLAYERS = 4
-MIN_PLAYERS = 2
+# Server configuration
+GAME_SERVER_PORT = int(os.environ.get("GAME_PORT", 9001))
 
-# Game state
-class GameState:
-    def __init__(self, match_id: str):
-        self.match_id = match_id
-        self.grid = [[0 for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]  # 0 = empty, 1 = gem
-        self.players: Dict[str, Dict] = {}  # username -> {position: (x,y), score: int}
-        self.start_time = None
-        self.is_running = False
-        self.last_gem_spawn = 0
+# Global state for game.py
+# players: websocket -> player_id (username)
+# rooms: room_id (match_id) -> { 'players': set of player_ids (usernames), 'game_state': {...} }
+# player_room_map: player_id (username) -> room_id (match_id)
 
-    def add_player(self, username: str, position: Tuple[int, int]):
-        self.players[username] = {
-            "position": position,
-            "score": 0
-        }
+# --- STATE MANAGEMENT (More robust) ---
+# These will store state PER GAME INSTANCE (i.e., per room_id derived from path)
+# For a single game.py process handling multiple rooms via path:
+game_sessions = {} #  match_id: { "players": {player_id: websocket}, "state": {...game specific state...} }
 
-    def remove_player(self, username: str):
-        if username in self.players:
-            del self.players[username]
+def get_match_id_from_path(path: str):
+    # Path will be like "/game/MATCH_ID"
+    parts = path.strip("/").split("/")
+    if len(parts) == 2 and parts[0] == "game":
+        return parts[1]
+    return None
 
-    def move_player(self, username: str, direction: str) -> bool:
-        if username not in self.players:
-            return False
-
-        x, y = self.players[username]["position"]
-        new_x, new_y = x, y
-
-        if direction == "up" and y > 0:
-            new_y -= 1
-        elif direction == "down" and y < GRID_SIZE - 1:
-            new_y += 1
-        elif direction == "left" and x > 0:
-            new_x -= 1
-        elif direction == "right" and x < GRID_SIZE - 1:
-            new_x += 1
-        else:
-            return False
-
-        # Check for gem collection
-        if self.grid[new_y][new_x] == 1:
-            self.players[username]["score"] += 1
-            self.grid[new_y][new_x] = 0
-
-        self.players[username]["position"] = (new_x, new_y)
-        return True
-
-    def spawn_gem(self):
-        empty_cells = []
-        for y in range(GRID_SIZE):
-            for x in range(GRID_SIZE):
-                if self.grid[y][x] == 0 and not any(p["position"] == (x, y) for p in self.players.values()):
-                    empty_cells.append((x, y))
-        
-        if empty_cells:
-            x, y = random.choice(empty_cells)
-            self.grid[y][x] = 1
-
-    def get_state(self) -> dict:
-        return {
-            "grid": self.grid,
-            "players": self.players,
-            "time_remaining": max(0, GAME_DURATION - (time.time() - self.start_time)) if self.start_time else GAME_DURATION,
-            "game_over": self.is_game_over()
-        }
-
-    def is_game_over(self) -> bool:
-        if not self.start_time:
-            return False
-        return time.time() - self.start_time >= GAME_DURATION
-
-    def get_winner(self) -> str:
-        if not self.is_game_over():
-            return None
-        return max(self.players.items(), key=lambda x: x[1]["score"])[0]
-
-# Active games
-active_games: Dict[str, GameState] = {}
-
-# At the top of the file, add this import if not already present
-import weakref
-
-# Add this after the active_games declaration (around line 92)
-connected_clients = {}
-
-# Replace the broadcast_game_state function
-async def broadcast_game_state(match_id: str):
-    if match_id not in active_games:
+async def handle_player(websocket: WebSocketServerProtocol, path: str):
+    match_id = get_match_id_from_path(path)
+    if not match_id:
+        print(f"[{timestamp()}] Invalid path: {path}. Closing connection.")
+        await websocket.close(code=1003, reason="Invalid path") # 1003: cannot accept data
         return
 
-    game = active_games[match_id]
-    state = game.get_state()
-    print(f"Broadcasting game state for match {match_id}: {state}")
-    
-    # Check for game over
-    if game.is_game_over():
-        winner = game.get_winner()
-        state["winner"] = winner
-        state["game_over"] = True
+    player_id = None # Will be the username
 
-    # Create the message once
-    message = json.dumps({
-        "type": "game_state",
-        "state": state
-    })
-    
-    # Get all connected websockets for this game
-    if match_id in connected_clients:
-        websockets_tasks = []
-        for ws in connected_clients[match_id]:
-            if not ws.closed:
-                websockets_tasks.append(asyncio.create_task(ws.send(message)))
-        
-        if websockets_tasks:
-            await asyncio.gather(*websockets_tasks, return_exceptions=True)
-
-# At the top of the file with other imports
-from websockets.asyncio.server import WebSocketServerProtocol, serve
-
-# Keep this line where it appears in the file (around line 139)
-WebSocketServerProtocol.instances = weakref.WeakSet()
-
-# Modify the game_handler function to track connections
-async def game_handler(websocket):
-    """Handle game WebSocket connections"""
     try:
-        # Get match_id from the path
-        path = websocket.path
-        match_id = path.split('/')[-1] if path else None
-        print(f"New connection attempt for match {match_id}")
-        
-        if not match_id or match_id not in active_games:
-            print(f"Game not found: {match_id}")
-            await websocket.close(1000, "Game not found")
-            return
+        # Initialize game session if it's the first player for this match_id
+        if match_id not in game_sessions:
+            game_sessions[match_id] = {
+                "players": {}, # player_id (username): websocket
+                "state": initialize_game_state() # Implement this function
+            }
+            print(f"[{timestamp()}] Initialized game session for match_id: {match_id}")
 
-        game = active_games[match_id]
-        username = None
+        session = game_sessions[match_id]
 
-        # Add this websocket to connected clients for this match
-        if match_id not in connected_clients:
-            connected_clients[match_id] = set()
-        connected_clients[match_id].add(websocket)
+        async for message_str in websocket:
+            try:
+                data = json.loads(message_str)
+            except json.JSONDecodeError:
+                print(f"[{timestamp()}] Invalid JSON from {player_id or websocket.remote_address} in {match_id}: {message_str}")
+                await websocket.send(json.dumps({"type": "error", "message": "Invalid JSON format"}))
+                continue
 
-        try:
-            async for message in websocket:
-                try:
-                    data = json.loads(message)
-                    print(f"Received message: {data}")
-                    
-                    if data["type"] == "join":
-                        username = data["username"]
-                        print(f"Player {username} joining match {match_id}")
-                        
-                        if len(game.players) >= MAX_PLAYERS:
-                            print(f"Game {match_id} is full")
-                            await websocket.send(json.dumps({
-                                "type": "error",
-                                "message": "Game is full"
-                            }))
-                            continue
+            action_type = data.get("type") # Client sends "type"
 
-                        # Assign starting position based on number of players
-                        positions = [(0, 0), (GRID_SIZE-1, 0), (0, GRID_SIZE-1), (GRID_SIZE-1, GRID_SIZE-1)]
-                        game.add_player(username, positions[len(game.players)])
-                        print(f"Added player {username} to position {positions[len(game.players)-1]}")
-                        
-                        # Start game if we have enough players
-                        if len(game.players) >= MIN_PLAYERS and not game.is_running:
-                            print(f"Starting game {match_id} with {len(game.players)} players")
-                            game.is_running = True
-                            game.start_time = time.time()
-                            game.last_gem_spawn = time.time()
-                            await broadcast_game_state(match_id)
-
-                    elif data["type"] == "move" and username:
-                        direction = data["direction"]
-                        print(f"Player {username} moving {direction}")
-                        if game.move_player(username, direction):
-                            await broadcast_game_state(match_id)
-
-                    elif data["type"] == "get_state":
-                        state = game.get_state()
-                        print(f"Sending game state: {state}")
-                        await websocket.send(json.dumps({
-                            "type": "game_state",
-                            "state": state
-                        }))
-                except json.JSONDecodeError as e:
-                    print(f"Invalid JSON received: {e}")
-                    print(f"Raw message: {message}")
+            if action_type == "join":
+                # Client sends: {"type": "join", "username": "user123"}
+                username = data.get("username")
+                if not username:
+                    await websocket.send(json.dumps({"type": "error", "message": "Username missing in join message."}))
                     continue
-                except Exception as e:
-                    print(f"Error processing message: {e}")
-                    print(traceback.format_exc())
+                
+                if player_id and player_id != username: # Should not happen if client is well-behaved
+                     await websocket.send(json.dumps({"type": "error", "message": "Username mismatch."}))
+                     continue
+                
+                player_id = username # Set player_id for this connection
+
+                # Check if player already in session (e.g. reconnect with same username but different websocket)
+                if player_id in session["players"] and session["players"][player_id] != websocket:
+                    print(f"[{timestamp()}] Player {player_id} rejoining/already joined in {match_id}. Closing old connection if any.")
+                    old_ws = session["players"].get(player_id)
+                    if old_ws and old_ws != websocket:
+                        await old_ws.close(reason="New connection for player") #
+                
+                session["players"][player_id] = websocket
+                # Add player to game state if not already there
+                if player_id not in session["state"]["players"]:
+                     session["state"]["players"][player_id] = {"score": 0, "position": (0,0)} # Example
+
+                print(f"[{timestamp()}] Player {player_id} joined match {match_id}")
+
+                # Notify others in the room (optional, or rely on next game_state broadcast)
+                await broadcast_to_session(match_id, {
+                    "type": "player_event", # Generic event type
+                    "event": "player_joined",
+                    "player_id": player_id
+                }, exclude_player_id=player_id)
+
+                # Send initial game state or ack
+                await websocket.send(json.dumps({"type": "join_ack", "status": "success", "player_id": player_id, "match_id": match_id}))
+                await websocket.send(json.dumps({"type": "game_state", "state": session["state"]}))
+
+
+            elif action_type == "move":
+                # Client sends: {"type": "move", "direction": "up"}
+                if not player_id: # Player must have joined first
+                    await websocket.send(json.dumps({"type": "error", "message": "Must join before moving."}))
                     continue
 
-        except websockets.ConnectionClosed as e:
-            print(f"Connection closed for {username} in match {match_id}: {e}")
-            if username:
-                game.remove_player(username)
-                await broadcast_game_state(match_id)
-        except Exception as e:
-            print(f"Error in game handler for match {match_id}: {e}")
-            print(traceback.format_exc())
-            if username:
-                game.remove_player(username)
-                await broadcast_game_state(match_id)
-        finally:
-            # Remove this websocket from connected clients
-            if match_id in connected_clients and websocket in connected_clients[match_id]:
-                connected_clients[match_id].remove(websocket)
-                if not connected_clients[match_id]:
-                    del connected_clients[match_id]
-    except Exception as e:
-        print(f"Fatal error in game handler: {e}")
-        print(traceback.format_exc())
-
-async def game_loop():
-    """Main game loop"""
-    print("\n" + "="*50)
-    print("🎮 GAME SERVER IS RUNNING")
-    print("="*50)
-    print("Waiting for players to connect...")
-    print("Press Ctrl+C to stop the server")
-    print("="*50 + "\n")
-    
-    last_status_time = time.time()
-    try:
-        while True:
-            current_time = time.time()
-            
-            # Print status every 5 seconds
-            if current_time - last_status_time >= 5:
-                active_games_count = len(active_games)
-                total_players = sum(len(game.players) for game in active_games.values())
-                print(f"\n📊 Server Status:")
-                print(f"Active games: {active_games_count}")
-                print(f"Total players: {total_players}")
-                print(f"Uptime: {int(current_time - start_time)} seconds")
-                print("-"*30)
-                last_status_time = current_time
-            
-            for match_id, game in list(active_games.items()):
-                if not game.is_running:
+                direction = data.get("direction")
+                if not direction:
+                    await websocket.send(json.dumps({"type": "error", "message": "Direction missing in move."}))
                     continue
 
-                # Spawn gems periodically
-                if current_time - game.last_gem_spawn >= GEM_SPAWN_INTERVAL:
-                    game.spawn_gem()
-                    game.last_gem_spawn = current_time
-                    print(f"💎 Spawned gem in match {match_id}")
-                    await broadcast_game_state(match_id)
+                print(f"[{timestamp()}] Player {player_id} in match {match_id} moved: {direction}")
+                
+                # --- ACTUAL GAME LOGIC HERE ---
+                # update_game_state_on_move(session["state"], player_id, direction)
+                # This function would modify session["state"] (e.g. player position, score)
+                # For example:
+                # new_pos = calculate_new_pos(session["state"]["players"][player_id]["position"], direction)
+                # session["state"]["players"][player_id]["position"] = new_pos
+                # if new_pos == gem_location: session["state"]["players"][player_id]["score"] +=1 etc.
+                # session["state"]["time_remaining"] -= 0.1 # if moves tick time
+                
+                # For now, just echo back, but you need real logic
+                # For simplicity, let's assume some game state update
+                session["state"]["last_move_by"] = player_id 
+                session["state"]["last_direction"] = direction
 
-                # Check for game over
-                if game.is_game_over():
-                    print(f"🏁 Game {match_id} is over")
-                    await broadcast_game_state(match_id)
-                    # Clean up game after a delay
-                    await asyncio.sleep(5)
-                    if match_id in active_games:
-                        del active_games[match_id]
+                # Broadcast new game state to all in the same session
+                await broadcast_to_session(match_id, {"type": "game_state", "state": session["state"]})
 
-            await asyncio.sleep(0.1)  # 10Hz update rate
-    except asyncio.CancelledError:
-        print("\n⚠️ Game loop cancelled")
-        raise
+            # No explicit "leave" from client, handled by disconnect.
+            # If client *did* send a "leave", you'd call handle_disconnect here.
+
+            else:
+                print(f"[{timestamp()}] Unknown action type from {player_id} in {match_id}: {action_type}")
+                await websocket.send(json.dumps({"type": "error", "message": f"Unknown action type: {action_type}"}))
+
+
+    except websockets.exceptions.ConnectionClosedOK:
+        print(f"[{timestamp()}] Player {player_id or websocket.remote_address} disconnected gracefully from {match_id}.")
+    except websockets.exceptions.ConnectionClosedError as e:
+        print(f"[{timestamp()}] Player {player_id or websocket.remote_address} connection closed with error from {match_id}: {e}")
     except Exception as e:
-        print(f"\n❌ Error in game loop: {e}")
-        print(traceback.format_exc())
-        raise
-
-async def start_game_server():
-    """Start the game server"""
-    global start_time
-    start_time = time.time()
-    
-    print("\n" + "="*50)
-    print("🚀 Starting Game Server...")
-    print(f"🌐 Listening on ws://0.0.0.0:9001")
-    print("="*50)
-    
-    # Create a test game for debugging
-    test_match_id = "test"
-    active_games[test_match_id] = GameState(test_match_id)
-    print(f"🎲 Created test game with ID: {test_match_id}")
-    
-    try:
-        server = await serve(game_handler, "0.0.0.0", 9001)
-        print("✅ Game server started successfully")
-        await game_loop()
-    except Exception as e:
-        print(f"\n❌ Error in game server: {e}")
-        print(traceback.format_exc())
+        print(f"[{timestamp()}] Error in handler for {player_id or websocket.remote_address} in {match_id}: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
-        if 'server' in locals():
-            print("\n🛑 Shutting down server...")
-            server.close()
-            await server.wait_closed()
-            print("✅ Server shutdown complete")
+        if player_id and match_id and match_id in game_sessions:
+            await handle_disconnect(player_id, match_id, websocket)
+
+async def handle_disconnect(player_id, match_id, websocket_that_disconnected):
+    session = game_sessions.get(match_id)
+    if not session:
+        return
+
+    # Only remove if the disconnected websocket is the one registered for this player_id
+    if session["players"].get(player_id) == websocket_that_disconnected:
+        print(f"[{timestamp()}] Player {player_id} disconnected from match {match_id}")
+        session["players"].pop(player_id, None)
+        
+        # Also remove player from game state representation if necessary
+        if "players" in session["state"] and player_id in session["state"]["players"]:
+            session["state"]["players"].pop(player_id, None) # Example, adjust based on your state structure
+
+        if not session["players"]:
+            print(f"[{timestamp()}] Match {match_id} is empty. Cleaning up session.")
+            del game_sessions[match_id]
+        else:
+            # Notify remaining players
+            await broadcast_to_session(match_id, {
+                "type": "player_event",
+                "event": "player_left",
+                "player_id": player_id
+            })
+            # Optionally send updated game state if player leaving affects it
+            await broadcast_to_session(match_id, {"type": "game_state", "state": session["state"]})
+
+
+async def broadcast_to_session(match_id, message_data, exclude_player_id=None):
+    session = game_sessions.get(match_id)
+    if not session:
+        return
+
+    try:
+        message_json = json.dumps(message_data)
+    except TypeError as e:
+        print(f"[{timestamp()}] Error serializing message for broadcast in {match_id}: {e}")
+        return
+
+    disconnected_players_during_broadcast = [] # Store (pid, ws) tuples
+
+    for pid, ws in list(session["players"].items()): # Iterate over a copy of items for safe modification
+        if pid == exclude_player_id:
+            continue
+        try:
+            await ws.send(message_json)
+        except websockets.exceptions.ConnectionClosed:
+            print(f"[{timestamp()}] Failed to send to {pid} in {match_id} (closed). Marking for disconnect.")
+            disconnected_players_during_broadcast.append((pid, ws))
+        except Exception as e:
+            print(f"[{timestamp()}] Error sending to {pid} in {match_id}: {e}")
+            # Depending on error, might also mark for disconnect
+
+    for d_pid, d_ws in disconnected_players_during_broadcast:
+        # Check if they haven't already been removed by another disconnect path
+        if d_pid in session["players"] and session["players"][d_pid] == d_ws:
+            await handle_disconnect(d_pid, match_id, d_ws)
+
+
+def initialize_game_state():
+    # TODO: Define your actual initial game state structure
+    return {
+        "grid": [[0]*10 for _ in range(10)], # Example 10x10 grid
+        "players": {}, # player_id: {"score": 0, "position": (x,y)}
+        "gems": [(1,1), (5,5)], # Example gem positions
+        "time_remaining": 60,
+        "game_over": False,
+        "winner": None
+    }
+
+def timestamp():
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+async def game_loop(): # If you need a periodic server-side loop for a game session
+    while True:
+        for match_id, session in list(game_sessions.items()): # Iterate copy
+            if not session["state"]["game_over"]:
+                session["state"]["time_remaining"] -= 1 # Example: decrement time
+                if session["state"]["time_remaining"] <= 0:
+                    session["state"]["game_over"] = True
+                    # Determine winner logic here:
+                    # session["state"]["winner"] = determine_winner(session["state"]["players"])
+                    print(f"[{timestamp()}] Game over for match {match_id}")
+                
+                # Broadcast updated state due to game loop
+                await broadcast_to_session(match_id, {"type": "game_state", "state": session["state"]})
+            
+            # If game over and no players, or some other cleanup condition
+            if session["state"]["game_over"] and not session["players"]:
+                 print(f"[{timestamp()}] Cleaning up finished and empty session {match_id}")
+                 del game_sessions[match_id]
+
+        await asyncio.sleep(1) # Game tick rate (1 second here)
+
+
+async def main():
+    print(f"[{timestamp()}] Game server started on ws://localhost:{GAME_SERVER_PORT}") # Use GAME_SERVER_PORT from client.py
+    
+    # If you have a game loop that affects all sessions (like time decrement)
+    # asyncio.create_task(game_loop())
+
+    # The port should match GAME_SERVER_PORT used by client and master
+    # Client uses 9001 by default (from its GAME_SERVER_PORT variable)
+    # Master.py GAME_PORT is 9001.
+    # So game.py should listen on 9001.
+    game_port_to_use = int(os.environ.get("GAME_PORT", 9001)) # Consistent port
+
+    async with serve(handle_player, "0.0.0.0", game_port_to_use) as server:
+        print(f"✅ Game server instance running on port {game_port_to_use}")
+        await asyncio.Future()  # run forever
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(start_game_server())
-    except KeyboardInterrupt:
-        print("\n\n👋 Server stopped by user")
-    except Exception as e:
-        print(f"\n❌ Error starting game server: {e}")
-        print(traceback.format_exc())
+    asyncio.run(main())

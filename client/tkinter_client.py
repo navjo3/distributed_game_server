@@ -22,7 +22,7 @@ GAME_SERVER_WS = f"ws://{SERVER_HOST}:{GAME_SERVER_PORT}"
 class GameClient:
     def __init__(self, root):
         self.root = root
-        self.root.title("Gem Hunt")
+        self.root.title("Multiplayer Game")
         
         # Game state
         self.username = None
@@ -248,43 +248,36 @@ class GameClient:
     def update_game_state(self, state):
         # Update time
         self.time_label.config(text=f"Time: {int(state['time_remaining'])}")
-        
-        # Update scores
-        scores = [f"{player}: {data['score']}" for player, data in state["players"].items()]
-        self.score_label.config(text=" | ".join(scores))
-        
-        # Update grid
+        # Update score
+        self.score_label.config(text=f"Score: {state.get('score', 0)}")
+        # Update game grid
+        self.update_grid(state.get('grid', []))
+
+    def update_grid(self, grid):
+        # Clear existing grid
         for widget in self.grid_frame.winfo_children():
             widget.destroy()
-            
-        grid = state["grid"]
-        players = state["players"]
         
-        for y in range(len(grid)):
-            for x in range(len(grid[0])):
-                cell = ttk.Frame(self.grid_frame, width=30, height=30, relief="solid", borderwidth=1)
-                cell.grid(row=y, column=x)
+        # Create new grid
+        for i, row in enumerate(grid):
+            for j, cell in enumerate(row):
+                cell_frame = ttk.Frame(self.grid_frame, width=40, height=40)
+                cell_frame.grid(row=i, column=j, padx=1, pady=1)
+                cell_frame.grid_propagate(False)
                 
-                if grid[y][x] == 1:
-                    ttk.Label(cell, text="💎").place(relx=0.5, rely=0.5, anchor="center")
-                
-                for player, data in players.items():
-                    if data["position"] == (x, y):
-                        ttk.Label(cell, text=player[0].upper()).place(relx=0.5, rely=0.5, anchor="center")
-        
-        if state.get("game_over"):
-            messagebox.showinfo("Game Over", f"Winner: {state.get('winner')}")
-            self.running = False
-            self.root.quit()
+                if cell == 'player':
+                    ttk.Label(cell_frame, text="P", background="green").pack(expand=True, fill='both')
+                elif cell == 'gem':
+                    ttk.Label(cell_frame, text="G", background="yellow").pack(expand=True, fill='both')
+                elif cell == 'wall':
+                    ttk.Label(cell_frame, text="W", background="gray").pack(expand=True, fill='both')
+                else:
+                    ttk.Label(cell_frame, text=" ").pack(expand=True, fill='both')
 
-    def run(self):
-        self.root.mainloop()
-        self.running = False
-        if self.websocket:
-            asyncio.run(self.websocket.close())
+def main():
+    root = tk.Tk()
+    app = GameClient(root)
+    root.mainloop()
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    root.geometry("400x500")
-    app = GameClient(root)
-    app.run()
+    main() 

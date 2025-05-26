@@ -6,10 +6,7 @@ import uuid
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
-<<<<<<< HEAD
-=======
-from websockets.asyncio.server import serve  # Add this import
->>>>>>> 1c9a33f (reverting changes)
+from websockets.server import serve  # Updated import path
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -25,8 +22,6 @@ PUBLIC_HOST = os.environ.get("PUBLIC_HOST", HOST)
 MATCHMAKING_WS_URL = f"ws://{PUBLIC_HOST}:{MATCHMAKING_PORT}"
 GAME_SERVER_WS_URL = f"ws://{PUBLIC_HOST}:{GAME_SERVER_PORT}/game/"
 
-MATCHMAKING_WS_URL = f"ws://localhost:{MATCHMAKING_PORT}"
-GAME_SERVER_WS_URL = "ws://localhost:9001/game/"
 MAX_PLAYERS_PER_MATCH = 4
 
 # Store rooms and their players
